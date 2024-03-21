@@ -17,12 +17,6 @@ import (
 )
 
 
-// Retry parameters
-const (
-	maxRetries  = 3
-	sleepFactor = 2
-)
-
 var stop = make(chan struct{}) // Channel to signal graceful server shutdown
 
 var currentChunk int64
@@ -171,9 +165,8 @@ func runServer(listenAddr string, authToken string) {
 
 }
 
-func runClient(url string, token string) {
+func runClient(url string, token string, maxRetries int, sleepFactor int, chunkSize int) {
 	// Create a buffer for the chunk
-	chunkSize := 2*1024*1024
 	chunk := make([]byte, chunkSize)
 
 	// Create HTTP client with custom TLS config to accept insecure connections
@@ -265,11 +258,18 @@ func main() {
 	var listenAddr string
 	var connectUrl string
 	var authToken string
+	var maxRetries int
+	var sleepFactor int
+	var maxChunkSize int
 	flag.StringVar(&listenAddr, "listen", "", "Address and port to listen on")
 	flag.StringVar(&listenAddr, "l", "", "Address and port to listen on (shorthand)")
 
 	flag.StringVar(&connectUrl, "connect", "", "url for server to connect")
 	flag.StringVar(&authToken, "token", "", "auth token")
+
+	flag.IntVar(&maxRetries, "max-retries", 10, "Maximum retries with backoff time increase between retries, each retry affects a single chunk")
+	flag.IntVar(&sleepFactor, "sleep-factor", 2, "sleep factor for backoff retries")
+	flag.IntVar(&maxChunkSize, "chunk-size", 2*1024*1024, "transfer chunk size")
 	flag.Parse()
 
 	if listenAddr != "" {
@@ -277,6 +277,6 @@ func main() {
 		os.Exit(0)
 	}
 	if connectUrl != "" {
-		runClient(connectUrl, authToken)
+		runClient(connectUrl, authToken, maxRetries, sleepFactor, maxChunkSize)
 	}
 }
