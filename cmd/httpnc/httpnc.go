@@ -116,7 +116,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func runServer(listenAddr string, authToken string) {
+func runServer(listenAddr string, authToken string, key string, crt string) {
 	// Regular expression to match the format hostname_or_address:port
 	addrRegex := regexp.MustCompile(`^([\w.-]+)?:\d+$`)
 	if !addrRegex.MatchString(listenAddr) {
@@ -126,7 +126,7 @@ func runServer(listenAddr string, authToken string) {
 	http.HandleFunc("/upload", authenticate(authToken, uploadHandler))
 
 	// Generate a self-signed certificate to use for HTTPS
-	cert, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
+	cert, err := tls.LoadX509KeyPair(crt, key)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading certificate: %v\n", err)
 		return
@@ -261,11 +261,16 @@ func main() {
 	var maxRetries int
 	var sleepFactor int
 	var maxChunkSize int
+	var key string
+	var crt string
 	flag.StringVar(&listenAddr, "listen", "", "Address and port to listen on")
 	flag.StringVar(&listenAddr, "l", "", "Address and port to listen on (shorthand)")
 
 	flag.StringVar(&connectUrl, "connect", "", "url for server to connect")
 	flag.StringVar(&authToken, "token", "", "auth token")
+
+	flag.StringVar(&key, "key", "key.pem", "tls key")
+        flag.StringVar(&crt, "cert", "cert.pem", "tls crt")
 
 	flag.IntVar(&maxRetries, "max-retries", 10, "Maximum retries with backoff time increase between retries, each retry affects a single chunk")
 	flag.IntVar(&sleepFactor, "sleep-factor", 2, "sleep factor for backoff retries")
@@ -273,7 +278,7 @@ func main() {
 	flag.Parse()
 
 	if listenAddr != "" {
-		runServer(listenAddr, authToken)
+		runServer(listenAddr, authToken, key, crt)
 		os.Exit(0)
 	}
 	if connectUrl != "" {
