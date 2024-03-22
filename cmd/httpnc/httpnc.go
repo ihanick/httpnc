@@ -2,20 +2,19 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"regexp"
-	"strings"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 )
-
 
 var stop = make(chan struct{}) // Channel to signal graceful server shutdown
 
@@ -72,8 +71,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Invalid chunk parameter: %v", err)
 		return
 	}
-
-
 
 	// Check if expected size is not equal to received size
 	if receivedSize != expectedSize {
@@ -141,7 +138,7 @@ func runServer(listenAddr string, authToken string, key string, crt string) {
 		TLSConfig: tlsConfig,
 	}
 
-		go func() {
+	go func() {
 		<-stop // Wait for the stop signal
 		fmt.Fprintln(os.Stderr, "\nShutting down server...")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -204,7 +201,7 @@ func runClient(url string, token string, maxRetries int, sleepFactor int, chunkS
 			break // No more data to read
 		}
 
-		req, err := http.NewRequest("POST", fmt.Sprintf("%s?chunk=%d&size=%d&last=%s", url, chunkNumber, combinedSize,strconv.FormatBool(last)), &combinedChunk)
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s?chunk=%d&size=%d&last=%s", url, chunkNumber, combinedSize, strconv.FormatBool(last)), &combinedChunk)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating request: %v\n", err)
 			os.Exit(1)
@@ -248,10 +245,8 @@ func runClient(url string, token string, maxRetries int, sleepFactor int, chunkS
 			fmt.Fprintf(os.Stderr, "Error reading server response: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf(".")
 		chunkNumber++
 	}
-		fmt.Printf("\n")
 }
 
 func main() {
@@ -270,7 +265,7 @@ func main() {
 	flag.StringVar(&authToken, "token", "", "auth token")
 
 	flag.StringVar(&key, "key", "key.pem", "tls key")
-        flag.StringVar(&crt, "cert", "cert.pem", "tls crt")
+	flag.StringVar(&crt, "cert", "cert.pem", "tls crt")
 
 	flag.IntVar(&maxRetries, "max-retries", 10, "Maximum retries with backoff time increase between retries, each retry affects a single chunk")
 	flag.IntVar(&sleepFactor, "sleep-factor", 2, "sleep factor for backoff retries")
