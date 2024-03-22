@@ -62,3 +62,9 @@ tar cz mydir | httpnc -connect https://localhost:8443/upload -token token123
              if [[ -z $pid || $pid = " " ]]; then
                  continue
 ```
+
+The my.cnf configuration requires:
+```
+[sst]
+transferfmt=httpnc
+```
