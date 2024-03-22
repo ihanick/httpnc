@@ -30,7 +30,7 @@ tar cz mydir | httpnc -connect https://localhost:8443/upload -token token123
                 ssl_cert=$(get_absolute_path "$ssl_cert")
                 ssl_key=$(get_absolute_path "$ssl_key")
 
-                tcmd="httpnc -l :${TSST_PORT} -token token123 -key ${ssl_key} -crt ${ssl_cert}"
+                tcmd="httpnc -l :${TSST_PORT} -token token123 -key ${ssl_key} -cert ${ssl_cert}"
         else
                 tcmd="httpnc -connect https://${REMOTEIP}:${TSST_PORT}/upload  -token token123"
         fi
