@@ -230,6 +230,7 @@ func sendChunk(chunk_url string, combinedChunk bytes.Buffer, token string, maxRe
 	// Set authentication token
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Close = true
 
 	var resp *http.Response
 	for retry := 0; retry < maxRetries; retry++ {
@@ -247,6 +248,7 @@ func sendChunk(chunk_url string, combinedChunk bytes.Buffer, token string, maxRe
 			} else {
 				fmt.Fprintf(os.Stderr, "Server response: %s", response)
 			}
+			resp.Body.Close()
 		}
 
 		// Apply exponential backoff before retrying
@@ -256,6 +258,7 @@ func sendChunk(chunk_url string, combinedChunk bytes.Buffer, token string, maxRe
 	}
 
 	defer resp.Body.Close()
+
 
 	if err != nil || resp.StatusCode != http.StatusOK {
 		fmt.Fprintf(os.Stderr, "Failed to upload chunk %s after %d retries. Exiting...\n", chunk_url, maxRetries)
