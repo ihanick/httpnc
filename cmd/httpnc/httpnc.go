@@ -254,6 +254,9 @@ func sendChunk(chunk_url string, combinedChunk bytes.Buffer, token string, maxRe
 		fmt.Fprintf(os.Stderr, "Retrying in %s...\n", sleepTime)
 		time.Sleep(sleepTime)
 	}
+
+	defer resp.Body.Close()
+
 	if err != nil || resp.StatusCode != http.StatusOK {
 		fmt.Fprintf(os.Stderr, "Failed to upload chunk %s after %d retries. Exiting...\n", chunk_url, maxRetries)
 		os.Exit(1)
