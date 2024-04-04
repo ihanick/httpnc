@@ -25,12 +25,18 @@ jobs:
       run: go build -v ./...
 
     - name: Run GoReleaser
-      uses: goreleaser/goreleaser-action@master
+      uses: goreleaser/goreleaser-action@v5
       with:
+        # either 'goreleaser' (default) or 'goreleaser-pro'
+        distribution: goreleaser
+        # 'latest', 'nightly', or a semver
         version: latest
-        args: release --rm-dist
+        args: release --clean
       env:
-        GITHUB_TOKEN: ${{ secrets.GO_RELEASER_GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Your GoReleaser Pro key, if you are using the 'goreleaser-pro' distribution
+        # GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+          
 
     - name: Test
       run: go test -v ./...
