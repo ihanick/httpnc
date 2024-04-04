@@ -17,13 +17,21 @@ import (
 	"time"
 )
 
+type ClientData struct {
+	url string
+	buf []byte
+	last bool
+}
+
 var (
-	currentChunk   int64
 	lastChunk      int64 = -1
 	chunks         map[int64][]byte
 	mutex          sync.Mutex
-	notificationCh = make(chan int64)
-	stop           = make(chan struct{}) // Channel to signal graceful server shutdown
+	notificationCh chan int64
+	stop           = make(chan struct{}, 2) // Channel to signal graceful server shutdown
+	clientBuffers    []ClientData    // Array of structs to hold client data
+	freeClients      chan int        // Global buffered channel with maxClients depth
+	clientTasks      chan int        // Channel for client tasks
 	wg             sync.WaitGroup
 )
 
@@ -86,25 +94,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lock to prevent concurrent writes to the global map
-	mutex.Lock()
-
-	// Initialize the map if not already initialized
-	if chunks == nil {
-		chunks = make(map[int64][]byte)
-	}
-
-	// Store the chunk in the global map with seqno as key
-	chunks[chunk] = body
-
-	mutex.Unlock()
-
-	// Notify the goroutine
-	notificationCh <- chunk
-	// Respond to the client
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Request body received\n")
-
 	lastStr := r.URL.Query().Get("last")
 	last, err := strconv.ParseBool(lastStr)
 	if err != nil {
@@ -113,20 +102,39 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Invalid last parameter: %v", err)
 		return
 	}
-	if last {
-		atomic.StoreInt64(&lastChunk, chunk)
+
+	// Respond to the client
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Request body received\n")
+
+	go func() {
+		wg.Add(1)
+		mutex.Lock()
+		if last {
+			atomic.StoreInt64(&lastChunk, chunk)
+		}
+
+		if chunks == nil {
+			chunks = make(map[int64][]byte)
+		}
+		chunks[chunk] = body
+		mutex.Unlock()
 		notificationCh <- chunk
-		return
-	}
+		wg.Done()
+	} ()
 }
 
 func chunkProcessor() {
+	var body []byte
+	cur_seqno := int64(0)
 	for {
 		_ = <-notificationCh
 
 		for {
-			var body []byte
-			cur_seqno := atomic.LoadInt64(&currentChunk)
+			select {
+			case <-notificationCh:
+			default:
+			}
 
 			found_next := false
 
@@ -142,10 +150,6 @@ func chunkProcessor() {
 				break
 			}
 
-			atomic.StoreInt64(&currentChunk, cur_seqno+1)
-
-			//fmt.Fprintf(os.Stderr, "next item: %d, found_next: %v\n", cur_seqno, found_next)
-
 			// Print the raw body to stdout
 			if _, err := os.Stdout.Write(body); err != nil {
 				fmt.Fprintf(os.Stderr, "Error writing request body to stdout: %v\n", err)
@@ -154,15 +158,18 @@ func chunkProcessor() {
 
 			if cur_seqno == atomic.LoadInt64(&lastChunk) {
 				fmt.Fprintln(os.Stderr, "Completed: OK")
+				wg.Wait()
 				stop <- struct{}{} // Signal to stop the server gracefully
-				close(notificationCh)
 				return
 			}
+			cur_seqno++
 		}
 	}
 }
 
-func runServer(listenAddr string, authToken string, key string, crt string) {
+func runServer(listenAddr string, authToken string, key string, crt string, parallelClients int) {
+	notificationCh = make(chan int64, parallelClients)
+
 	// Regular expression to match the format hostname_or_address:port
 	addrRegex := regexp.MustCompile(`^([\w.-]+)?:\d+$`)
 	if !addrRegex.MatchString(listenAddr) {
@@ -190,7 +197,7 @@ func runServer(listenAddr string, authToken string, key string, crt string) {
 	go func() {
 		<-stop // Wait for the stop signal
 		fmt.Fprintln(os.Stderr, "\nShutting down server...")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
 		if err := server.Shutdown(ctx); err != nil {
@@ -213,7 +220,7 @@ func runServer(listenAddr string, authToken string, key string, crt string) {
 
 }
 
-func sendChunk(chunk_url string, combinedChunk bytes.Buffer, token string, maxRetries int, sleepFactor int) {
+func sendChunk(token string, maxRetries int, sleepFactor int, connectionClose bool) {
 	defer wg.Done()
 	// Create HTTP client with custom TLS config to accept insecure connections
 	httpClient := &http.Client{
@@ -222,101 +229,131 @@ func sendChunk(chunk_url string, combinedChunk bytes.Buffer, token string, maxRe
 		},
 	}
 
-	req, err := http.NewRequest("POST", chunk_url, &combinedChunk)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating request: %v\n", err)
-		os.Exit(1)
-	}
-	// Set authentication token
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Close = true
-
-	var resp *http.Response
-	for retry := 0; retry < maxRetries; retry++ {
-		resp, err = httpClient.Do(req)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			break // Successful request
+	for {
+		index := 0
+		select {
+		case index = <-clientTasks:
+		case <-stop:
+			stop <- struct{}{} 
+			return
 		}
+
+		req, err := http.NewRequest("POST", clientBuffers[index].url, bytes.NewReader(clientBuffers[index].buf))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error sending request: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "Failed to upload chunk %s. Server returned status: %d\n", chunk_url, resp.StatusCode)
-			response, err := io.ReadAll(resp.Body)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error reading server response: %v\n", err)
-			} else {
-				fmt.Fprintf(os.Stderr, "Server response: %s", response)
+			fmt.Fprintf(os.Stderr, "Error creating request: %v\n", err)
+			os.Exit(1)
+		}
+		// Set authentication token
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Close = connectionClose
+
+		var resp *http.Response
+		for retry := 0; retry < maxRetries; retry++ {
+			resp, err = httpClient.Do(req)
+			if err == nil && resp.StatusCode == http.StatusOK {
+				break // Successful request
 			}
-			resp.Body.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error sending request: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Failed to upload chunk %s. Server returned status: %d\n", clientBuffers[index].url, resp.StatusCode)
+				response, err := io.ReadAll(resp.Body)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error reading server response: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "Server response: %s", response)
+				}
+				resp.Body.Close()
+			}
+
+			// Apply exponential backoff before retrying
+			sleepTime := time.Duration(sleepFactor<<retry) * time.Second
+			fmt.Fprintf(os.Stderr, "Retrying in %s...\n", sleepTime)
+			time.Sleep(sleepTime)
 		}
 
-		// Apply exponential backoff before retrying
-		sleepTime := time.Duration(sleepFactor<<retry) * time.Second
-		fmt.Fprintf(os.Stderr, "Retrying in %s...\n", sleepTime)
-		time.Sleep(sleepTime)
+		defer resp.Body.Close()
+
+
+		if err != nil || resp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "Failed to upload chunk %s after %d retries. Exiting...\n", clientBuffers[index].url, maxRetries)
+			os.Exit(1)
+		}
+
+		_, err = io.ReadAll(resp.Body)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading server response: %v\n", err)
+		}
+
+
+		if clientBuffers[index].last {
+			stop <- struct{}{} 
+			return
+		}
+
+		// Signal that processing is done and the index is available
+		freeClients <- index
 	}
-
-	defer resp.Body.Close()
-
-
-	if err != nil || resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "Failed to upload chunk %s after %d retries. Exiting...\n", chunk_url, maxRetries)
-		os.Exit(1)
-	}
-
-	_, err = io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading server response: %v\n", err)
-		os.Exit(1)
-	}
-
 }
 
 func runClient(url string, token string, maxRetries int, sleepFactor int, chunkSize int, maxClients int) {
-	// Create a buffer for the chunk
-	chunk := make([]byte, chunkSize)
-
-	currentClients := 0
 	chunkNumber := 0
+
+	clientBuffers = make([]ClientData, maxClients)
+
+	// Initialize freeClients channel
+	freeClients = make(chan int, maxClients)
+
+	// Populate freeClients with client indices
+	for i := 0; i < maxClients; i++ {
+		freeClients <- i
+		wg.Add(1)
+		go sendChunk(token, maxRetries, sleepFactor, false)
+	}
+
+	// Initialize clientTasks channel
+	clientTasks = make(chan int)
+
+	for i := 0; i < maxClients; i++ {
+		clientBuffers[i].buf = make([]byte, chunkSize)
+	}
 	// Read binary data from stdin in chunks of 2MB
 	for {
-		var combinedChunk bytes.Buffer
-		combinedSize := 0
 		last := false
-
-		// Read subsequent chunks to combine with the current chunk
-		for combinedSize < chunkSize {
-			n, err := os.Stdin.Read(chunk)
-			if err != nil && err == io.EOF {
-				last = true
-			}
-			if err != nil && err != io.EOF {
-				fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
-				os.Exit(1)
-			}
-			if n == 0 {
-				break
-			}
-			combinedSize += n
-			combinedChunk.Write(chunk[:n])
+		clientId := <-freeClients
+		bytesRead, err := io.ReadFull(os.Stdin, clientBuffers[clientId].buf)
+		if err != nil && err == io.EOF {
+			last = true
 		}
 
-		chunk_url := fmt.Sprintf("%s?chunk=%d&size=%d&last=%s", url, chunkNumber, combinedSize, strconv.FormatBool(last))
+		clientBuffers[clientId].last = last
+
+		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
+			break
+		}
+
+		// Adjust the length of the buffer according to the number of bytes read
+		clientBuffers[clientId].buf = clientBuffers[clientId].buf[:bytesRead]
+		clientBuffers[clientId].url = fmt.Sprintf(
+			"%s?chunk=%d&size=%d&last=%s",
+			url,
+			chunkNumber,
+			len(clientBuffers[clientId].buf),
+			strconv.FormatBool(last))
 		chunkNumber++
 
-		if currentClients > maxClients {
-			wg.Wait()
-			currentClients = 0
-		}
-		currentClients++
 
-		wg.Add(1)
-		go sendChunk(chunk_url, combinedChunk, token, maxRetries, sleepFactor)
-		if combinedSize == 0 || last {
+		// Signal that buffer is filled and ready for processing
+		clientTasks <- clientId
+
+		if last {
 			break // No more data to read
 		}
 	}
+
+	// Wait for all tasks to finish
 	wg.Wait()
 }
 
@@ -346,7 +383,7 @@ func main() {
 	flag.Parse()
 
 	if listenAddr != "" {
-		runServer(listenAddr, authToken, key, crt)
+		runServer(listenAddr, authToken, key, crt, parallelClients)
 		os.Exit(0)
 	}
 	if connectUrl != "" {
