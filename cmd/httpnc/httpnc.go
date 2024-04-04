@@ -23,13 +23,22 @@ type ClientData struct {
 	last bool
 }
 
+type ChunkData struct {
+	id int64
+	buf []byte
+	last bool
+}
+
+
+
 var (
 	lastChunk      int64 = -1
-	chunks         map[int64][]byte
+	chunks         map[int64]int
 	mutex          sync.Mutex
 	notificationCh chan int64
 	stop           = make(chan struct{}, 2) // Channel to signal graceful server shutdown
 	clientBuffers    []ClientData    // Array of structs to hold client data
+	serverBuffers    []ChunkData
 	freeClients      chan int        // Global buffered channel with maxClients depth
 	clientTasks      chan int        // Channel for client tasks
 	wg             sync.WaitGroup
@@ -69,16 +78,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the raw request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, "Error reading request body: %v", err)
-		return
-	}
-	defer r.Body.Close()
-
-	receivedSize := len(body)
 	expectedSizeStr := r.URL.Query().Get("size")
 	expectedSize, err := strconv.Atoi(expectedSizeStr)
 	if err != nil {
@@ -86,6 +85,22 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Invalid chunk parameter: %v", err)
 		return
 	}
+
+	chunkBufferId := <- freeClients
+	receivedSize := 0
+	if expectedSize != 0 {
+		bytesRead, err := io.ReadFull(r.Body, serverBuffers[chunkBufferId].buf)
+		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "Error reading request body: %v", err)
+			return
+		}
+		receivedSize = bytesRead
+	}
+	serverBuffers[chunkBufferId].buf = serverBuffers[chunkBufferId].buf[:receivedSize]
+	defer r.Body.Close()
+
+
 
 	// Check if expected size is not equal to received size
 	if receivedSize != expectedSize {
@@ -115,9 +130,9 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if chunks == nil {
-			chunks = make(map[int64][]byte)
+			chunks = make(map[int64]int)
 		}
-		chunks[chunk] = body
+		chunks[chunk] = chunkBufferId
 		mutex.Unlock()
 		notificationCh <- chunk
 		wg.Done()
@@ -125,7 +140,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func chunkProcessor() {
-	var body []byte
 	cur_seqno := int64(0)
 	for {
 		_ = <-notificationCh
@@ -137,11 +151,12 @@ func chunkProcessor() {
 			}
 
 			found_next := false
+			chunkBufferId := -1
 
 			mutex.Lock()
 			if val, ok := chunks[cur_seqno]; ok {
 				found_next = true
-				body = val // Remove the item from the map
+				chunkBufferId = val // Remove the item from the map
 				delete(chunks, cur_seqno)
 			}
 			mutex.Unlock()
@@ -151,7 +166,7 @@ func chunkProcessor() {
 			}
 
 			// Print the raw body to stdout
-			if _, err := os.Stdout.Write(body); err != nil {
+			if _, err := os.Stdout.Write(serverBuffers[chunkBufferId].buf); err != nil {
 				fmt.Fprintf(os.Stderr, "Error writing request body to stdout: %v\n", err)
 				os.Exit(2)
 			}
@@ -163,12 +178,24 @@ func chunkProcessor() {
 				return
 			}
 			cur_seqno++
+			freeClients <- chunkBufferId
 		}
 	}
 }
 
-func runServer(listenAddr string, authToken string, key string, crt string, parallelClients int) {
+func runServer(listenAddr string, authToken string, key string, crt string, parallelClients int, chunkSize int) {
 	notificationCh = make(chan int64, parallelClients)
+	serverBuffers = make([]ChunkData, parallelClients)
+
+	for i := 0; i < parallelClients; i++ {
+		serverBuffers[i].buf = make([]byte, chunkSize)
+	}
+	freeClients = make(chan int, parallelClients)
+
+	for i := 0; i < parallelClients; i++ {
+		freeClients <- i
+	}
+
 
 	// Regular expression to match the format hostname_or_address:port
 	addrRegex := regexp.MustCompile(`^([\w.-]+)?:\d+$`)
@@ -383,7 +410,7 @@ func main() {
 	flag.Parse()
 
 	if listenAddr != "" {
-		runServer(listenAddr, authToken, key, crt, parallelClients)
+		runServer(listenAddr, authToken, key, crt, parallelClients, maxChunkSize)
 		os.Exit(0)
 	}
 	if connectUrl != "" {
