@@ -21,6 +21,25 @@ Initiate transer on the source side:
 tar cz mydir | httpnc -connect https://localhost:8443/upload -token token123
 ```
 
+## TLS verification
+By default certificates are not verified.
+
+* Provide a full chain at server side:
+```
+cat tls.crt ca.pem > full.crt
+httpnc -cert full.crt -key tls.key -listen 0.0.0.0:8443 -token token123
+```
+* Enable certificate verification at client side:
+```
+httpnc --connect https://cluster1-pxc:8443/upload -token token123 -insecure=false
+```
+* If you are using self-signed CA, specify it for the client
+```
+httpnc --connect https://cluster1-pxc:8443/upload -token token123 -ca ca.pem -insecure=false
+```
+* in both cases, cluster1-pxc domain name should be the common name or list of alternate dns names
+
+
 ### SST for PXC
 
 ```diff

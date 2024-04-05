@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"io"
@@ -247,12 +248,32 @@ func runServer(listenAddr string, authToken string, key string, crt string, para
 
 }
 
-func sendChunk(token string, maxRetries int, sleepFactor int, connectionClose bool) {
+func sendChunk(token string, maxRetries int, sleepFactor int, connectionClose bool, insecureSkipVerify bool, CAFile string) {
 	defer wg.Done()
+
+	tlsConfig := &tls.Config{InsecureSkipVerify: insecureSkipVerify}
+	if CAFile != "" {
+		// Load CA certificate
+		caCert, err := os.ReadFile(CAFile)
+		if err != nil {
+			fmt.Println("Error reading CA certificate file:", err)
+			return
+		}
+
+		// Create a certificate pool and add CA certificate
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		// Create a TLS configuration with custom CA certificate pool
+		tlsConfig = &tls.Config{
+			RootCAs: caCertPool,
+			InsecureSkipVerify: insecureSkipVerify,
+		}
+	}
 	// Create HTTP client with custom TLS config to accept insecure connections
 	httpClient := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // for self-signed certs
+			TLSClientConfig: tlsConfig, // for self-signed certs
 		},
 	}
 
@@ -324,7 +345,7 @@ func sendChunk(token string, maxRetries int, sleepFactor int, connectionClose bo
 	}
 }
 
-func runClient(url string, token string, maxRetries int, sleepFactor int, chunkSize int, maxClients int) {
+func runClient(url string, token string, maxRetries int, sleepFactor int, chunkSize int, maxClients int, insecureSkipVerify bool, CAFile string) {
 	chunkNumber := 0
 
 	clientBuffers = make([]ClientData, maxClients)
@@ -336,7 +357,7 @@ func runClient(url string, token string, maxRetries int, sleepFactor int, chunkS
 	for i := 0; i < maxClients; i++ {
 		freeClients <- i
 		wg.Add(1)
-		go sendChunk(token, maxRetries, sleepFactor, false)
+		go sendChunk(token, maxRetries, sleepFactor, false, insecureSkipVerify, CAFile)
 	}
 
 	// Initialize clientTasks channel
@@ -394,6 +415,8 @@ func main() {
 	var parallelClients int
 	var key string
 	var crt string
+	var ca_file string
+	var insecure bool
 	flag.StringVar(&listenAddr, "listen", "", "Address and port to listen on")
 	flag.StringVar(&listenAddr, "l", "", "Address and port to listen on (shorthand)")
 
@@ -402,6 +425,8 @@ func main() {
 
 	flag.StringVar(&key, "key", "key.pem", "tls key")
 	flag.StringVar(&crt, "cert", "cert.pem", "tls crt")
+	flag.StringVar(&ca_file, "ca", "", "server's CA certificate")
+	flag.BoolVar(&insecure, "insecure", true, "use false to enable tls checks")
 
 	flag.IntVar(&maxRetries, "max-retries", 10, "Maximum retries with backoff time increase between retries, each retry affects a single chunk")
 	flag.IntVar(&sleepFactor, "sleep-factor", 2, "sleep factor for backoff retries")
@@ -414,6 +439,6 @@ func main() {
 		os.Exit(0)
 	}
 	if connectUrl != "" {
-		runClient(connectUrl, authToken, maxRetries, sleepFactor, maxChunkSize, parallelClients)
+		runClient(connectUrl, authToken, maxRetries, sleepFactor, maxChunkSize, parallelClients, insecure, ca_file)
 	}
 }
